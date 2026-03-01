@@ -1,7 +1,5 @@
 # 🦊 Kettu Plugins
 
-<img src="https://cdn.discordapp.com/emojis/1098485309195911168.webp?size=96&quality=lossless" width="64" height="64" alt="Kettu Logo">
-
 A collection of plugins for **Kettu** / **Revenge** - modified Discord clients for Android.
 
 ## 📂 Available Plugins
