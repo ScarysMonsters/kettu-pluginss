@@ -9339,6 +9339,52 @@
     }
     return finalId;
   }
+  function preprocessPluginCode(code) {
+    var processed = code;
+    processed = processed.replace(/^import\s+type\s+.*?;\s*$/gm, "");
+    processed = processed.replace(/^import\s+\{[^}]*\}\s+from\s+["'][^"']*["']\s*;?\s*$/gm, "");
+    processed = processed.replace(/^import\s+\w+\s+from\s+["'][^"']*["']\s*;?\s*$/gm, "");
+    processed = processed.replace(/^import\s+\*\s+as\s+\w+\s+from\s+["'][^"']*["']\s*;?\s*$/gm, "");
+    processed = processed.replace(/^export\s+default\s+/gm, "plugin = ");
+    processed = processed.replace(/^export\s+(const|let|var|function|class)\s/gm, "$1 ");
+    processed = processed.replace(/\bexport\s+default\s+(\w+)\s*$/gm, "plugin = $1");
+    processed = processed.replace(/\bmodule\.exports\s*=\s*/g, "plugin = ");
+    if (/\bexports\.\w+\s*=/.test(processed) && !/\bvar\s+exports\b/.test(processed)) {
+      processed = "var exports = exports || {};\n" + processed;
+    }
+    if (!/\bplugin\s*=/.test(processed) && /\bdefinePlugin\s*\(/.test(processed)) {
+      processed = processed.replace(/\bdefinePlugin\s*\(/g, "plugin = definePlugin(");
+    }
+    if (!/\bplugin\s*=/.test(processed) && /\bbunny\s*\(/.test(processed)) {
+      processed = processed.replace(/\bbunny\s*\(/g, "plugin = bunny(");
+    }
+    return processed;
+  }
+  function deriveManifestUrl(fileUrl) {
+    var lastSlash = fileUrl.lastIndexOf("/");
+    var dirUrl = fileUrl.substring(0, lastSlash + 1);
+    return dirUrl + "manifest.json";
+  }
+  function deriveJsUrl(baseUrl, main) {
+    var lastSlash = baseUrl.lastIndexOf("/");
+    var dirUrl = baseUrl.substring(0, lastSlash + 1);
+    return dirUrl + (main || "index.js");
+  }
+  function tryFetchManifest(fileUrl) {
+    return _async_to_generator(function* () {
+      try {
+        var manifestUrl = deriveManifestUrl(fileUrl);
+        var resp = yield safeFetch(manifestUrl, {
+          cache: "no-store"
+        });
+        if (resp.ok) {
+          return yield resp.json();
+        }
+      } catch (e) {
+      }
+      return null;
+    })();
+  }
   function loadCustomPlugin(jsCode, options) {
     return _async_to_generator(function* () {
       var id = generateCustomPluginId(options.name || `unnamed-${Date.now()}`);
@@ -9359,11 +9405,11 @@
         display: {
           name: pluginName,
           description: options.description || "Custom plugin loaded via OpenLoader",
-          authors: options.author ? [
+          authors: options.authors || (options.author ? [
             {
               name: options.author
             }
-          ] : void 0
+          ] : void 0)
         },
         main: "index.js",
         source: options.source,
@@ -9394,8 +9440,27 @@
       } catch (error) {
         throw new Error(`Failed to read plugin file at '${filePath}': ${error instanceof Error ? error.message : String(error)}`);
       }
+      var manifestData = null;
+      try {
+        var lastSlash = filePath.lastIndexOf("/");
+        var dir = filePath.substring(0, lastSlash + 1);
+        var manifestPath = dir + "manifest.json";
+        var manifestCode = yield readFile(manifestPath);
+        manifestData = JSON.parse(manifestCode);
+      } catch (e) {
+      }
+      var pluginName = name || manifestData?.name || filePath.split("/").pop()?.replace(/\.(js|tsx?)$/, "") || void 0;
+      var authors = manifestData?.authors ? Array.isArray(manifestData.authors) ? manifestData.authors : [
+        {
+          name: String(manifestData.authors)
+        }
+      ] : void 0;
       return loadCustomPlugin(jsCode, {
-        name: name || filePath.split("/").pop()?.replace(/\.(js|tsx?)$/, "") || void 0,
+        name: pluginName,
+        description: manifestData?.description,
+        author: typeof manifestData?.author === "string" ? manifestData.author : void 0,
+        authors,
+        version: manifestData?.version,
         source: "file",
         sourceInfo: filePath
       });
@@ -9406,9 +9471,14 @@
       if (!url2 || !url2.startsWith("http://") && !url2.startsWith("https://")) {
         throw new Error("Invalid URL: must start with http:// or https://");
       }
+      var manifestData = yield tryFetchManifest(url2);
+      var jsUrl = url2;
+      if (manifestData?.main && !url2.endsWith(".js") && !url2.endsWith(".tsx")) {
+        jsUrl = deriveJsUrl(url2, manifestData.main);
+      }
       var jsCode;
       try {
-        var response = yield safeFetch(url2, {
+        var response = yield safeFetch(jsUrl, {
           cache: "no-store"
         });
         if (!response.ok) {
@@ -9418,10 +9488,20 @@
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("HTTP"))
           throw error;
-        throw new Error(`Failed to fetch plugin from '${url2}': ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Failed to fetch plugin from '${jsUrl}': ${error instanceof Error ? error.message : String(error)}`);
       }
+      var pluginName = name || manifestData?.name || url2.split("/").pop()?.replace(/\.(js|tsx?)$/, "") || void 0;
+      var authors = manifestData?.authors ? Array.isArray(manifestData.authors) ? manifestData.authors : [
+        {
+          name: String(manifestData.authors)
+        }
+      ] : void 0;
       return loadCustomPlugin(jsCode, {
-        name: name || url2.split("/").pop()?.replace(/\.(js|tsx?)$/, "") || void 0,
+        name: pluginName,
+        description: manifestData?.description,
+        author: typeof manifestData?.author === "string" ? manifestData.author : void 0,
+        authors,
+        version: manifestData?.version,
         source: "url",
         sourceInfo: url2
       });
@@ -9646,26 +9726,25 @@
       yield removeFile(`plugins/scripts/${id}.js`);
     })();
   }
-  function preprocessPluginCode(code) {
-    var processed = code;
-    processed = processed.replace(/^export\s+default\s+/m, "plugin = ");
-    processed = processed.replace(/\bexport\s+default\s+(\w+)\s*$/m, "plugin = $1");
-    processed = processed.replace(/\bmodule\.exports\s*=\s*/g, "plugin = ");
-    if (/\bexports\.\w+\s*=/.test(processed) && !/\bvar\s+exports\b/.test(processed)) {
-      processed = "var exports = exports || {};\n" + processed;
+  function getIIFEPreamble(id, jsPath) {
+    return `
+var __selfRef = null;
+var OptionType = { STRING: 5, NUMBER: 4, BOOLEAN: 3, SELECT: 6, SLIDER: 2, INPUT: 0 };
+function definePluginSettings(def) {
+    var storage = bunny.plugin.createStorage();
+    for (var k in def) {
+        if (def[k] && def[k].default !== undefined && storage[k] === undefined) {
+            storage[k] = def[k].default;
+        }
     }
-    processed = processed.replace(/^import\s+type\s+.*?;\s*$/gm, "");
-    processed = processed.replace(/^import\s+\{[^}]*\}\s+from\s+["'][^"']*["']\s*;?\s*$/gm, "");
-    processed = processed.replace(/^import\s+\w+\s+from\s+["'][^"']*["']\s*;?\s*$/gm, "");
-    processed = processed.replace(/^import\s+\*\s+as\s+\w+\s+from\s+["'][^"']*["']\s*;?\s*$/gm, "");
-    processed = processed.replace(/^export\s+(const|let|var|function|class)\s/gm, "$1 ");
-    if (!/\bplugin\s*=/.test(processed) && /\bdefinePlugin\s*\(/.test(processed)) {
-      processed = processed.replace(/\bdefinePlugin\s*\(/g, "plugin = definePlugin(");
-    }
-    if (!/\bplugin\s*=/.test(processed) && /\bbunny\s*\(/.test(processed)) {
-      processed = processed.replace(/\bbunny\s*\(/g, "plugin = bunny(");
-    }
-    return processed;
+    return { definition: def, store: storage };
+}
+var _origDP = definePlugin;
+definePlugin = function(p) {
+    __selfRef = p;
+    return _origDP(p);
+};
+`;
   }
   function startPlugin(_0) {
     return _async_to_generator(function* (id, { throwIfDisabled = false, disableWhenThrown = true } = {}) {
@@ -9685,8 +9764,10 @@
         assert(jsPath, id, "start a plugin with no JS path");
         try {
           var code = yield readFile(jsPath);
+          var isCustom = isCustomPlugin(manifest);
           code = preprocessPluginCode(code);
-          var instantiator = globalEvalWithSourceUrl(`(bunny,definePlugin)=>{${code};return plugin?.default ?? plugin;}`, `kettu-openloader/${id}-${manifest.version}`);
+          var preamble = isCustom ? getIIFEPreamble(id, jsPath) : "";
+          var instantiator = globalEvalWithSourceUrl(`(bunny,definePlugin)=>{${preamble}${code};return plugin?.default ?? plugin;}`, `kettu-openloader/${id}-${manifest.version}`);
         } catch (error) {
           throw new Error("An error occured while parsing plugin's code, possibly a syntax error?", {
             cause: error
